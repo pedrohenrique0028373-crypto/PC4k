@@ -1,0 +1,279 @@
+name: PC criado pelo @alves7.pcm
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_number:
+        description: 'Instance Number (1-10)'
+        required: true
+        default: '1'
+        type: string
+      stream_password:
+        description: 'Senha do Sunshine (Web UI / pareamento)'
+        required: true
+        default: 'P@ssw0rd!'
+        type: string
+  # schedule:
+  #   - cron: '0 */6 * * *'   # re-deploy automático (limite de 6h por run)
+
+concurrency:
+  group: enigmano-moonlight
+  cancel-in-progress: false
+
+jobs:
+  deploy-moonlight:
+    runs-on: windows-latest
+    timeout-minutes: 355
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: System Information
+      run: |
+        Write-Host "=== ENIGMANO MOONLIGHT HOST ===" -ForegroundColor Green
+        Write-Host "Instance Number: ${{ github.event.inputs.instance_number }}" -ForegroundColor Yellow
+        Write-Host "Run ID: ${{ github.run_id }}" -ForegroundColor Yellow
+
+    # ------------------------------------------------------------------
+    # ACESSO / SESSÃO
+    # ------------------------------------------------------------------
+    - name: Enable RDP (apenas para setup/pareamento)
+      run: |
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
+
+    - name: Create User Account + Autologon
+      run: |
+        $Password = ConvertTo-SecureString "${{ github.event.inputs.stream_password }}" -AsPlainText -Force
+        Set-LocalUser -Name "runneradmin" -Password $Password
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin" -ErrorAction SilentlyContinue
+
+        # Autologon: garante sessão de console viva (o Sunshine captura a sessão ativa)
+        $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+        Set-ItemProperty $winlogon -Name 'AutoAdminLogon'   -Value '1'
+        Set-ItemProperty $winlogon -Name 'DefaultUserName'  -Value 'runneradmin'
+        Set-ItemProperty $winlogon -Name 'DefaultPassword'  -Value "${{ github.event.inputs.stream_password }}"
+        Set-ItemProperty $winlogon -Name 'DefaultDomainName' -Value $env:COMPUTERNAME
+
+        # Sem tela de bloqueio / protetor de tela
+        New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization' -Force | Out-Null
+        Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization' -Name 'NoLockScreen' -Value 1
+        Set-ItemProperty 'HKCU:\Control Panel\Desktop' -Name 'ScreenSaveActive' -Value '0'
+
+    - name: Helper "voltar pro console"
+      run: |
+        # Depois de usar RDP, rode este atalho antes de fechar: devolve a sessão ao console
+        # e mantém o desktop ativo para o Sunshine capturar.
+        @'
+        @echo off
+        for /f "tokens=1" %%i in ('query session ^| findstr /i "runneradmin"') do set SID=%%i
+        tscon %SID% /dest:console
+        echo Sessao devolvida ao console.
+        pause
+        '@ | Set-Content -Path 'C:\Users\Public\Desktop\voltar-ao-console.cmd' -Encoding ASCII
+
+    # ------------------------------------------------------------------
+    # PERFORMANCE / SPOOF COSMÉTICO
+    # ------------------------------------------------------------------
+    - name: DEEP GPU SPOOFING & ULTRA PERFORMANCE
+      run: |
+        Write-Host "=== MODO ULTRA PERFORMANCE (SPOOF COSMETICO RTX 3060) ===" -ForegroundColor Cyan
+
+        # 1. SPOOF DE HARDWARE (cosmetico: aparece no Gerenciador de Dispositivos, sem NVENC real)
+        $gpuRegPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be2fd79}"
+        foreach ($sub in @("0000","0001")) {
+            $fullPath = "$gpuRegPath\$sub"
+            if (-not (Test-Path $fullPath)) { New-Item -Path $fullPath -Force | Out-Null }
+            New-ItemProperty -Path $fullPath -Name "DriverDesc" -Value "NVIDIA GeForce RTX 3060" -PropertyType String -Force -ErrorAction SilentlyContinue
+            New-ItemProperty -Path $fullPath -Name "HardwareInformation.DeviceDesc" -Value "NVIDIA GeForce RTX 3060" -PropertyType String -Force -ErrorAction SilentlyContinue
+            New-ItemProperty -Path $fullPath -Name "FriendlyName" -Value "NVIDIA GeForce RTX 3060" -PropertyType String -Force -ErrorAction SilentlyContinue
+            New-ItemProperty -Path $fullPath -Name "ProviderName" -Value "NVIDIA" -PropertyType String -Force -ErrorAction SilentlyContinue
+        }
+
+        # 2. CPU / RAM
+        powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c | Out-Null
+        Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling' -Name 'PowerThrottlingOff' -Value 1 -ErrorAction SilentlyContinue
+        powercfg /change monitor-timeout-ac 0
+        powercfg /change standby-timeout-ac 0
+
+        # 3. Latencia de UI
+        Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name 'MenuShowDelay' -Value '0' -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name 'MouseHoverTime' -Value '1' -ErrorAction SilentlyContinue
+
+        # 4. Rede
+        netsh int tcp set global autotuninglevel=normal | Out-Null
+        netsh int tcp set global chimney=enabled | Out-Null
+
+        # 5. Defender fora do caminho (libera CPU pro encoder)
+        Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+
+        Write-Host "=== CONCLUIDO ===" -ForegroundColor Cyan
+
+    # ------------------------------------------------------------------
+    # REDE PRIVADA
+    # ------------------------------------------------------------------
+    - name: Install Tailscale (Silent)
+      run: |
+        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+        $installerPath = "$env:TEMP\tailscale.msi"
+        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+        Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
+        Remove-Item $installerPath -Force
+
+    - name: Start Tailscale
+      run: |
+        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey ${{ secrets.TAILSCALE_AUTH_KEY }} --hostname "enigmano-${{ github.run_id }}"
+        Start-Sleep -Seconds 15
+
+    - name: Get Tailscale IP
+      run: |
+        $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+        Write-Host "Tailscale IP: $tsIP" -ForegroundColor Green
+        "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append
+        "TS_HOSTNAME=enigmano-${{ github.run_id }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+    # ------------------------------------------------------------------
+    # APPS
+    # ------------------------------------------------------------------
+    - name: Install Google Chrome (Direct)
+      run: |
+        $installerPath = "$env:TEMP\chrome_installer.exe"
+        Invoke-WebRequest -Uri "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile $installerPath
+        Start-Process -FilePath $installerPath -ArgumentList "/silent /install" -Wait
+        Remove-Item $installerPath -Force
+
+    - name: Install 7-Zip (Direct)
+      run: |
+        $installerPath = "$env:TEMP\7z-installer.exe"
+        Invoke-WebRequest -Uri "https://www.7-zip.org/a/7z2409-x64.exe" -OutFile $installerPath
+        Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
+        Remove-Item $installerPath -Force
+
+    - name: Install VC++ Runtime (dependencia do Sunshine)
+      run: |
+        $vcUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+        $p = "$env:TEMP\vc_redist.x64.exe"
+        Invoke-WebRequest -Uri $vcUrl -OutFile $p
+        Start-Process -FilePath $p -ArgumentList "/install /quiet /norestart" -Wait
+        Remove-Item $p -Force
+
+    # ------------------------------------------------------------------
+    # SUNSHINE (HOST MOONLIGHT)
+    # ------------------------------------------------------------------
+    - name: Install Sunshine
+      run: |
+        Write-Host "Installing Sunshine (MSI)..." -ForegroundColor Green
+        $msi = "$env:TEMP\Sunshine.msi"
+        Invoke-WebRequest -Uri "https://github.com/LizardByte/Sunshine/releases/latest/download/Sunshine-Windows-AMD64-installer.msi" -OutFile $msi
+        Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
+        Remove-Item $msi -Force
+        Get-Service Sunshine | Format-List Name, Status
+
+    - name: Configure Sunshine
+      run: |
+        $conf = "C:\Program Files\Sunshine\config\sunshine.conf"
+        $sun  = "C:\Program Files\Sunshine\sunshine.exe"
+
+        Stop-Service Sunshine -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+
+        New-Item -ItemType Directory -Path (Split-Path $conf) -Force | Out-Null
+
+        $origin1 = "https://$env:TAILSCALE_IP:47990"
+        $origin2 = "https://$env:TS_HOSTNAME:47990"
+
+        @"
+        sunshine_name = enigmano-${{ github.event.inputs.instance_number }}
+        port = 47989
+        address_family = ipv4
+        upnp = off
+        origin_web_ui_allowed = wan
+        csrf_allowed_origins = $origin1,$origin2
+        ping_timeout = 300
+        [video]
+        encoder = software
+        sw_preset = superfast
+        sw_tune = zerolatency
+        min_fps_factor = 1
+        qp = 26
+        " | Set-Content -Path $conf -Encoding UTF8
+
+        # Credenciais fixas da Web UI / pareamento
+        & $sun --creds runneradmin "${{ github.event.inputs.stream_password }}"
+
+        # Regras de firewall (TCP 47984-47990/48010, UDP 47998-48010) + interface Tailscale
+        New-NetFirewallRule -DisplayName "Sunshine TCP" -Direction Inbound -Protocol TCP -LocalPort 47984,47989,47990,48010 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+        New-NetFirewallRule -DisplayName "Sunshine UDP" -Direction Inbound -Protocol UDP -LocalPort 47998-48010 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+        New-NetFirewallRule -DisplayName "Tailscale-In" -Direction Inbound -InterfaceAlias "Tailscale" -Action Allow -ErrorAction SilentlyContinue | Out-Null
+
+        Start-Service Sunshine
+        Start-Sleep -Seconds 10
+        Get-Service Sunshine | Format-List Name, Status
+        Get-Content "C:\Program Files\Sunshine\config\sunshine.log" -Tail 25 -ErrorAction SilentlyContinue
+
+    # ------------------------------------------------------------------
+    # OPCIONAIS (nao quebram o job)
+    # ------------------------------------------------------------------
+    - name: Virtual Display Driver (opcional)
+      continue-on-error: true
+      run: |
+        # Driver assinado da Parsec. Se nao criar display sozinho, abra
+        # Configuracoes > Sistema > Tela e defina 1920x1080 manualmente.
+        winget install --id Parsec.ParsecVDD --exact --silent --accept-package-agreements --accept-source-agreements
+        Start-Sleep -Seconds 10
+        Get-PnpDevice -Class Display | Format-Table FriendlyName, Status -AutoSize
+
+    - name: Virtual Audio (opcional)
+      continue-on-error: true
+      run: |
+        $zip = "$env:TEMP\vbcable.zip"
+        Invoke-WebRequest -Uri "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack43.zip" -OutFile $zip
+        Expand-Archive -Path $zip -DestinationPath "$env:TEMP\vbcable" -Force
+        pnputil /add-driver "$env:TEMP\vbcable\vbcable\vbcable_x64.inf" /install
+        Remove-Item $zip -Force
+
+    # ------------------------------------------------------------------
+    # RESUMO
+    # ------------------------------------------------------------------
+    - name: Connection Details
+      run: |
+        $lines = @(
+          "## ENIGMANO MOONLIGHT HOST",
+          "",
+          "| Campo | Valor |",
+          "| --- | --- |",
+          "| Host Tailscale | ``$env:TAILSCALE_IP`` |",
+          "| Web UI | ``https://$env:TAILSCALE_IP:47990`` |",
+          "| Usuario Web UI | ``runneradmin`` |",
+          "| Senha Web UI | ``${{ github.event.inputs.stream_password }}`` |",
+          "",
+          "### Como parear",
+          "1. Conecte o cliente na mesma tailnet.",
+          "2. Abra a Web UI, aceite o certificado e faca login.",
+          "3. No Moonlight, adicione o host e informe o PIN na aba PIN da Web UI.",
+          "4. Se estiver usando RDP, rode ``voltar-ao-console.cmd`` antes de sair.",
+          "",
+          "> Encoder: libx264 (CPU). Nao ha GPU real neste runner."
+        )
+        $lines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+        $lines | ForEach-Object { Write-Host $_ }
+
+    - name: Keep Session Alive
+      run: |
+        $counter = 0
+        while ($true) {
+          $counter++
+          Write-Host "Heartbeat #$counter ($(Get-Date))" -ForegroundColor Green
+          $ts = & "C:\Program Files\Tailscale\tailscale.exe" status
+          if ($ts -notmatch "active") {
+            Write-Host "Tailscale caiu - reconectando..." -ForegroundColor Red
+            & "C:\Program Files\Tailscale\tailscale.exe" up --authkey ${{ secrets.TAILSCALE_AUTH_KEY }} --hostname "enigmano-${{ github.run_id }}"
+          }
+          if ((Get-Service Sunshine).Status -ne 'Running') {
+            Write-Host "Sunshine parado - reiniciando..." -ForegroundColor Red
+            Start-Service Sunshine -ErrorAction SilentlyContinue
+          }
+          Start-Sleep -Seconds 60
+        }
